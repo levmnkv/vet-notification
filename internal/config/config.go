@@ -20,7 +20,7 @@ func Load() (*Config, error) {
 
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
-		databaseURL = "postgres://vet:vet@postgres:5432/vetdb?sslmode=disable"
+		return nil, fmt.Errorf("DATABASE_URL environment variable is required")
 	}
 
 	tikvAddrsStr := os.Getenv("TIKV_PD_ADDRS")
