@@ -77,6 +77,8 @@ func TestDateString_Valid(t *testing.T) {
 		expected time.Time
 	}{
 		{"2026-03-08", time.Date(2026, 3, 8, 0, 0, 0, 0, time.UTC)},
+		{"08.03.2026", time.Date(2026, 3, 8, 0, 0, 0, 0, time.UTC)},
+		{"2026.03.08", time.Date(2026, 3, 8, 0, 0, 0, 0, time.UTC)},
 		{"2020-01-01", time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)},
 		{"2100-12-31", time.Date(2100, 12, 31, 0, 0, 0, 0, time.UTC)},
 		{"  2026-06-15  ", time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)},

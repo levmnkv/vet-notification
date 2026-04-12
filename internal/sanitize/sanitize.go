@@ -53,9 +53,23 @@ func PetName(name string) (string, error) {
 func DateString(s string) (time.Time, error) {
 	s = strings.TrimSpace(s)
 
-	parsed, err := time.Parse("2006-01-02", s)
+	formats := []string{
+		"2006-01-02",
+		"02.01.2006",
+		"2006.01.02",
+	}
+
+	var parsed time.Time
+	var err error
+	for _, format := range formats {
+		parsed, err = time.Parse(format, s)
+		if err == nil {
+			break
+		}
+	}
+
 	if err != nil {
-		return time.Time{}, fmt.Errorf("неверный формат даты, используйте ГГГГ-ММ-ДД (например, 2026-03-08)")
+		return time.Time{}, fmt.Errorf("неверный формат даты. Используйте: ГГГГ-ММ-ДД, ДД.ММ.ГГГГ или ГГГГ.ММ.ДД")
 	}
 
 	minDate := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
