@@ -1,26 +1,49 @@
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-*.txt
-.Python
-env/
-venv/
-.venv/
-pip-log.txt
-pip-delete-this-directory.txt
-.tox
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.log
+# Version control
 .git
-.mypy_cache
-.pytest_cache
-.hypothesis
+.gitignore
+.dockerignore
+
+# Go build files
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+vendor/
+
+# Environment files
+.env
+.env.*
+
+# Local data / DB volumes
+data/
+db-data/
+vet-pgdata/
+vet-pd-data/
+vet-tikv-data/
+
+# IDE and OS files
+.vscode/
+.idea/
 .DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Documentation (not needed in production image)
 README.md
-.env.example
+docs/
+.github/
+
+# Test and coverage files
+cover.out
+coverage.html
+
+# Docker compose configs
+docker-compose.yml
+docker-compose.override.yml
