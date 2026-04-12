@@ -13,6 +13,7 @@ import (
 	"github.com/levmi/vet-notifications-go/internal/kv"
 	"github.com/levmi/vet-notifications-go/internal/logger"
 	"github.com/levmi/vet-notifications-go/internal/reminder"
+	"github.com/levmi/vet-notifications-go/internal/sanitize"
 	"github.com/levmi/vet-notifications-go/internal/storage"
 )
 
@@ -24,26 +25,24 @@ type TelegramSender interface {
 
 // Bot represents the Telegram bot.
 type Bot struct {
-	api       TelegramSender
-	logger    *slog.Logger
-	startDate time.Time
-	storage   storage.Storage
-	kvStore   kv.KVStore
+	api     TelegramSender
+	logger  *slog.Logger
+	storage storage.Storage
+	kvStore kv.KVStore
 }
 
 // New creates a new Bot instance.
-func New(token string, logger *slog.Logger, startDate time.Time, st storage.Storage, kvStore kv.KVStore) (*Bot, error) {
+func New(token string, logger *slog.Logger, st storage.Storage, kvStore kv.KVStore) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create bot API: %w", err)
 	}
 
 	b := &Bot{
-		api:       api,
-		logger:    logger,
-		startDate: startDate,
-		storage:   st,
-		kvStore:   kvStore,
+		api:     api,
+		logger:  logger,
+		storage: st,
+		kvStore: kvStore,
 	}
 
 	if err := b.SetCommands(); err != nil {
@@ -54,19 +53,17 @@ func New(token string, logger *slog.Logger, startDate time.Time, st storage.Stor
 }
 
 // NewWithSender creates a new bot with a custom sender (for tests)
-func NewWithSender(sender TelegramSender, logger *slog.Logger, startDate time.Time, st storage.Storage, kvStore kv.KVStore) *Bot {
+func NewWithSender(sender TelegramSender, logger *slog.Logger, st storage.Storage, kvStore kv.KVStore) *Bot {
 	return &Bot{
-		api:       sender,
-		logger:    logger,
-		startDate: startDate,
-		storage:   st,
-		kvStore:   kvStore,
+		api:     sender,
+		logger:  logger,
+		storage: st,
+		kvStore: kvStore,
 	}
 }
 
 // GetUpdatesChan returns a channel for receiving updates from Telegram.
 func (b *Bot) GetUpdatesChan() (tgbotapi.UpdatesChannel, error) {
-	// this is a bit ugly since we use an interface internally, so cast back if possible
 	api, ok := b.api.(*tgbotapi.BotAPI)
 	if !ok {
 		return nil, fmt.Errorf("underlying API is not tgbotapi.BotAPI")
@@ -86,6 +83,8 @@ func (b *Bot) SetCommands() error {
 		{Command: "add-pet", Description: "Добавить питомца: /add-pet [имя]"},
 		{Command: "my-pets", Description: "Список питомцев"},
 		{Command: "injection-site", Description: "Изменить стартовое место укола"},
+		{Command: "start-date", Description: "Установить дату начала: /start-date ГГГГ-ММ-ДД"},
+		{Command: "reminder-time", Description: "Установить время напоминания: /reminder-time ЧЧ:ММ"},
 		{Command: "help", Description: "Справка по командам"},
 	}
 
@@ -107,7 +106,6 @@ func (b *Bot) HandleUpdate(update tgbotapi.Update) {
 		userID = update.CallbackQuery.From.ID
 		username = update.CallbackQuery.From.UserName
 	} else {
-		// Ignore other types of updates for now
 		return
 	}
 
@@ -143,6 +141,10 @@ func (b *Bot) HandleUpdate(update tgbotapi.Update) {
 			b.handleMyPets(traceLogger, update.Message)
 		case "injection-site":
 			b.handleInjectionSite(traceLogger, update.Message)
+		case "start-date":
+			b.handleStartDate(traceLogger, update.Message)
+		case "reminder-time":
+			b.handleReminderTime(traceLogger, update.Message)
 		default:
 			traceLogger.Warn("Unknown command", "command", update.Message.Command())
 		}
@@ -152,7 +154,6 @@ func (b *Bot) HandleUpdate(update tgbotapi.Update) {
 func (b *Bot) handleStart(log *slog.Logger, message *tgbotapi.Message) {
 	userID := message.From.ID
 
-	// Check if user has any pets
 	pets, err := b.storage.GetPets(userID)
 	if err != nil {
 		log.Error("Failed to get pets", "error", err, "userID", userID)
@@ -188,7 +189,9 @@ func (b *Bot) handleHelp(log *slog.Logger, message *tgbotapi.Message) {
 		"/today - Узнать, что нужно делать сегодня\n" +
 		"/weight [число] - Записать вес (например, /weight 3.5)\n" +
 		"/weight - Посмотреть историю записей веса\n" +
-		"/injection-site - Изменить стартовое место укола"
+		"/injection-site - Изменить стартовое место укола\n" +
+		"/start-date ГГГГ-ММ-ДД - Установить дату начала цикла\n" +
+		"/reminder-time ЧЧ:ММ - Установить время напоминания (UTC)"
 
 	msg := tgbotapi.NewMessage(message.Chat.ID, helpText)
 	_, err := b.api.Send(msg)
@@ -207,7 +210,15 @@ func (b *Bot) handleAddPet(log *slog.Logger, message *tgbotapi.Message) {
 		return
 	}
 
-	petID, err := b.storage.AddPet(message.From.ID, args)
+	// Validate pet name
+	cleanName, err := sanitize.PetName(args)
+	if err != nil {
+		msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("❌ %s", err.Error()))
+		_, _ = b.api.Send(msg)
+		return
+	}
+
+	petID, err := b.storage.AddPet(message.From.ID, cleanName)
 	if err != nil {
 		log.Error("Failed to add pet", "error", err, "userID", message.From.ID)
 		msg := tgbotapi.NewMessage(message.Chat.ID, "Произошла ошибка при добавлении питомца.")
@@ -224,7 +235,7 @@ func (b *Bot) handleAddPet(log *slog.Logger, message *tgbotapi.Message) {
 	}
 
 	// Send confirmation with injection site selection buttons
-	text := fmt.Sprintf("✅ Питомец «%s» добавлен!\n\nВыберите стартовое место укола:", args)
+	text := fmt.Sprintf("✅ Питомец «%s» добавлен!\n\nВыберите стартовое место укола:", cleanName)
 	keyboard := buildInjectionSiteKeyboard(petID, -1, "set_injection_site")
 	msg := tgbotapi.NewMessage(message.Chat.ID, text)
 	msg.ReplyMarkup = keyboard
@@ -232,7 +243,7 @@ func (b *Bot) handleAddPet(log *slog.Logger, message *tgbotapi.Message) {
 	if err != nil {
 		log.Error("Failed to send add-pet confirmation", "error", err)
 	} else {
-		log.Info("Pet added", "userID", message.From.ID, "petName", args, "petID", petID)
+		log.Info("Pet added", "userID", message.From.ID, "petName", cleanName, "petID", petID)
 	}
 }
 
@@ -262,7 +273,13 @@ func (b *Bot) handleMyPets(log *slog.Logger, message *tgbotapi.Message) {
 		if p.ID == activePetID {
 			marker = " ✅ (активный)"
 		}
-		sb.WriteString(fmt.Sprintf("• %s (место укола: %s)%s\n", p.Name, reminder.InjectionSites[p.StartInjectionIndex], marker))
+		sb.WriteString(fmt.Sprintf("• %s (укол: %s, начало: %s, напоминание: %02d:%02d UTC)%s\n",
+			p.Name,
+			reminder.InjectionSites[p.StartInjectionIndex],
+			p.StartDate.Format("02.01.2006"),
+			p.ReminderHour, p.ReminderMinute,
+			marker,
+		))
 	}
 	sb.WriteString("\nВыберите активного питомца:")
 
@@ -314,8 +331,101 @@ func (b *Bot) handleInjectionSite(log *slog.Logger, message *tgbotapi.Message) {
 	}
 }
 
+func (b *Bot) handleStartDate(log *slog.Logger, message *tgbotapi.Message) {
+	userID := message.From.ID
+
+	pet, err := b.getActivePet(userID)
+	if err != nil {
+		log.Error("Failed to get active pet", "error", err)
+		msg := tgbotapi.NewMessage(message.Chat.ID, "Произошла ошибка.")
+		_, _ = b.api.Send(msg)
+		return
+	}
+	if pet == nil {
+		msg := tgbotapi.NewMessage(message.Chat.ID, "У вас нет активного питомца. Добавьте командой /add-pet [имя]")
+		_, _ = b.api.Send(msg)
+		return
+	}
+
+	args := strings.TrimSpace(message.CommandArguments())
+	if args == "" {
+		msg := tgbotapi.NewMessage(message.Chat.ID,
+			fmt.Sprintf("📅 Текущая дата начала цикла для «%s»: **%s**\n\nЧтобы изменить: /start-date ГГГГ-ММ-ДД\nНапример: /start-date 2026-03-08",
+				pet.Name, pet.StartDate.Format("02.01.2006")))
+		msg.ParseMode = tgbotapi.ModeMarkdown
+		_, _ = b.api.Send(msg)
+		return
+	}
+
+	date, err := sanitize.DateString(args)
+	if err != nil {
+		msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("❌ %s", err.Error()))
+		_, _ = b.api.Send(msg)
+		return
+	}
+
+	if err := b.storage.SetStartDate(pet.ID, date); err != nil {
+		log.Error("Failed to set start date", "error", err)
+		msg := tgbotapi.NewMessage(message.Chat.ID, "Произошла ошибка при сохранении даты.")
+		_, _ = b.api.Send(msg)
+		return
+	}
+
+	msg := tgbotapi.NewMessage(message.Chat.ID,
+		fmt.Sprintf("✅ Дата начала цикла для «%s» установлена: **%s**", pet.Name, date.Format("02.01.2006")))
+	msg.ParseMode = tgbotapi.ModeMarkdown
+	_, _ = b.api.Send(msg)
+	log.Info("Start date updated", "userID", userID, "petID", pet.ID, "date", date.Format("2006-01-02"))
+}
+
+func (b *Bot) handleReminderTime(log *slog.Logger, message *tgbotapi.Message) {
+	userID := message.From.ID
+
+	pet, err := b.getActivePet(userID)
+	if err != nil {
+		log.Error("Failed to get active pet", "error", err)
+		msg := tgbotapi.NewMessage(message.Chat.ID, "Произошла ошибка.")
+		_, _ = b.api.Send(msg)
+		return
+	}
+	if pet == nil {
+		msg := tgbotapi.NewMessage(message.Chat.ID, "У вас нет активного питомца. Добавьте командой /add-pet [имя]")
+		_, _ = b.api.Send(msg)
+		return
+	}
+
+	args := strings.TrimSpace(message.CommandArguments())
+	if args == "" {
+		msg := tgbotapi.NewMessage(message.Chat.ID,
+			fmt.Sprintf("⏰ Текущее время напоминания для «%s»: **%02d:%02d UTC**\n\nЧтобы изменить: /reminder-time ЧЧ:ММ\nНапример: /reminder-time 16:00",
+				pet.Name, pet.ReminderHour, pet.ReminderMinute))
+		msg.ParseMode = tgbotapi.ModeMarkdown
+		_, _ = b.api.Send(msg)
+		return
+	}
+
+	hour, minute, err := sanitize.TimeString(args)
+	if err != nil {
+		msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("❌ %s", err.Error()))
+		_, _ = b.api.Send(msg)
+		return
+	}
+
+	if err := b.storage.SetReminderTime(pet.ID, hour, minute); err != nil {
+		log.Error("Failed to set reminder time", "error", err)
+		msg := tgbotapi.NewMessage(message.Chat.ID, "Произошла ошибка при сохранении времени.")
+		_, _ = b.api.Send(msg)
+		return
+	}
+
+	msg := tgbotapi.NewMessage(message.Chat.ID,
+		fmt.Sprintf("✅ Время напоминания для «%s» установлено: **%02d:%02d UTC**", pet.Name, hour, minute))
+	msg.ParseMode = tgbotapi.ModeMarkdown
+	_, _ = b.api.Send(msg)
+	log.Info("Reminder time updated", "userID", userID, "petID", pet.ID, "time", fmt.Sprintf("%02d:%02d", hour, minute))
+}
+
 // buildInjectionSiteKeyboard creates inline buttons for the 4 injection sites.
-// currentIndex is highlighted with ✓. prefix determines callback data format.
 func buildInjectionSiteKeyboard(petID int, currentIndex int, prefix string) tgbotapi.InlineKeyboardMarkup {
 	var row1, row2 []tgbotapi.InlineKeyboardButton
 	for i, site := range reminder.InjectionSites {
@@ -350,7 +460,7 @@ func (b *Bot) handleToday(log *slog.Logger, message *tgbotapi.Message) {
 	}
 
 	now := time.Now()
-	dayNumber := reminder.CalculateDayNumber(b.startDate, now)
+	dayNumber := reminder.CalculateDayNumber(pet.StartDate, now)
 	messageText := reminder.FormatMessage(dayNumber, now, pet.Name, pet.StartInjectionIndex)
 
 	done := false
@@ -367,7 +477,6 @@ func (b *Bot) handleToday(log *slog.Logger, message *tgbotapi.Message) {
 	msg := tgbotapi.NewMessage(message.Chat.ID, messageText)
 	msg.ParseMode = tgbotapi.ModeMarkdown
 
-	// Add inline keyboard
 	if !done {
 		keyboard := tgbotapi.NewInlineKeyboardMarkup(
 			tgbotapi.NewInlineKeyboardRow(
@@ -385,31 +494,22 @@ func (b *Bot) handleToday(log *slog.Logger, message *tgbotapi.Message) {
 	}
 }
 
-// SendReminders sends the daily reminder to all configured users.
-func (b *Bot) SendReminders(ctx context.Context, dayNumber int, date time.Time) {
+// SendReminders sends reminders to all pets whose reminder_time matches the given hour/minute.
+func (b *Bot) SendReminders(ctx context.Context, hour, minute int, now time.Time) {
 	traceLogger := logger.WithTraceID(b.logger)
 
-	userIDs, err := b.storage.GetAllUserIDs()
+	pets, err := b.storage.GetPetsForReminder(hour, minute)
 	if err != nil {
-		traceLogger.Error("Failed to get all user IDs for reminders", "error", err)
+		traceLogger.Error("Failed to get pets for reminder", "error", err, "hour", hour, "minute", minute)
 		return
 	}
 
-	for _, userID := range userIDs {
-		pet, err := b.getActivePet(userID)
-		if err != nil {
-			traceLogger.Error("Failed to get active pet for reminder", "error", err, "userID", userID)
-			continue
-		}
-		if pet == nil {
-			traceLogger.Info("User has no active pet, skipping reminder", "userID", userID)
-			continue
-		}
-
-		messageText := reminder.FormatMessage(dayNumber, date, pet.Name, pet.StartInjectionIndex)
+	for _, pet := range pets {
+		dayNumber := reminder.CalculateDayNumber(pet.StartDate, now)
+		messageText := reminder.FormatMessage(dayNumber, now, pet.Name, pet.StartInjectionIndex)
 
 		done := false
-		isDone, err := b.storage.IsInjectionDone(pet.ID, date)
+		isDone, err := b.storage.IsInjectionDone(pet.ID, now)
 		if err != nil {
 			traceLogger.Error("Failed to check if injection is done", "error", err)
 		}
@@ -424,14 +524,13 @@ func (b *Bot) SendReminders(ctx context.Context, dayNumber int, date time.Time) 
 		var sendErr error
 
 		for attempt := 1; attempt <= maxRetries; attempt++ {
-			msg := tgbotapi.NewMessage(userID, messageText)
+			msg := tgbotapi.NewMessage(pet.UserID, messageText)
 			msg.ParseMode = tgbotapi.ModeMarkdown
 
-			// Add inline keyboard
 			if !done {
 				keyboard := tgbotapi.NewInlineKeyboardMarkup(
 					tgbotapi.NewInlineKeyboardRow(
-						tgbotapi.NewInlineKeyboardButtonData("✅ Сделано!", fmt.Sprintf("done_%d_%s", pet.ID, date.Format("2006-01-02"))),
+						tgbotapi.NewInlineKeyboardButtonData("✅ Сделано!", fmt.Sprintf("done_%d_%s", pet.ID, now.Format("2006-01-02"))),
 					),
 				)
 				msg.ReplyMarkup = keyboard
@@ -439,24 +538,24 @@ func (b *Bot) SendReminders(ctx context.Context, dayNumber int, date time.Time) 
 
 			_, sendErr = b.api.Send(msg)
 			if sendErr == nil {
-				traceLogger.Info("Reminder sent successfully", "userID", userID, "dayNumber", dayNumber, "petName", pet.Name)
+				traceLogger.Info("Reminder sent successfully", "userID", pet.UserID, "dayNumber", dayNumber, "petName", pet.Name)
 				break
 			}
 
-			traceLogger.Warn("Failed to send reminder", "attempt", attempt, "userID", userID, "error", sendErr)
+			traceLogger.Warn("Failed to send reminder", "attempt", attempt, "userID", pet.UserID, "error", sendErr)
 
 			if attempt < maxRetries {
 				select {
 				case <-ctx.Done():
-					traceLogger.Error("Context cancelled while retrying to send reminder", "userID", userID)
+					traceLogger.Error("Context cancelled while retrying to send reminder", "userID", pet.UserID)
 					return
-				case <-time.After(time.Duration(attempt) * time.Second): // 1s, 2s backoff
+				case <-time.After(time.Duration(attempt) * time.Second):
 				}
 			}
 		}
 
 		if sendErr != nil {
-			traceLogger.Error("Failed to send reminder after all retries", "userID", userID, "error", sendErr)
+			traceLogger.Error("Failed to send reminder after all retries", "userID", pet.UserID, "error", sendErr)
 		}
 	}
 }
@@ -477,7 +576,6 @@ func (b *Bot) getActivePet(userID int64) (*storage.Pet, error) {
 	}
 
 	if pet == nil || pet.UserID != userID {
-		// Try to find first pet and set it as active
 		pets, err := b.storage.GetPets(userID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get pets: %w", err)
@@ -512,11 +610,9 @@ func (b *Bot) handleWeight(log *slog.Logger, message *tgbotapi.Message) {
 		return
 	}
 
-	args := message.CommandArguments()
-	args = strings.TrimSpace(args)
+	args := strings.TrimSpace(message.CommandArguments())
 
 	if args == "" {
-		// Show first page of weight history
 		text, keyboard, err := b.buildWeightPage(pet.ID, pet.Name, 0)
 		if err != nil {
 			log.Error("Failed to build weight page", "error", err)
@@ -538,10 +634,10 @@ func (b *Bot) handleWeight(log *slog.Logger, message *tgbotapi.Message) {
 		return
 	}
 
-	// Add new weight
-	weight, err := strconv.ParseFloat(strings.ReplaceAll(args, ",", "."), 64)
+	// Validate weight
+	weight, err := sanitize.Weight(args)
 	if err != nil {
-		msg := tgbotapi.NewMessage(message.Chat.ID, "Неверный формат веса. Пожалуйста, используйте число, например: /weight 3.5")
+		msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("❌ %s", err.Error()))
 		_, _ = b.api.Send(msg)
 		return
 	}
@@ -605,32 +701,27 @@ func (b *Bot) buildWeightPage(petID int, petName string, page int) (string, *tgb
 }
 
 // buildWeightKeyboard builds the inline pagination keyboard.
-// Buttons: ⏮ first | ◀️ prev | ▶️ next | ⏭ last
 func buildWeightKeyboard(petID int, currentPage, totalPages int) tgbotapi.InlineKeyboardMarkup {
 	var buttons []tgbotapi.InlineKeyboardButton
 
-	// ⏮ First page
 	if currentPage > 0 {
 		buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData("⏮", fmt.Sprintf("weight_page_%d_%d", petID, 0)))
 	} else {
 		buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData("⏮", "weight_noop"))
 	}
 
-	// ◀️ Previous page
 	if currentPage > 0 {
 		buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData("◀️", fmt.Sprintf("weight_page_%d_%d", petID, currentPage-1)))
 	} else {
 		buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData("◀️", "weight_noop"))
 	}
 
-	// ▶️ Next page
 	if currentPage < totalPages-1 {
 		buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData("▶️", fmt.Sprintf("weight_page_%d_%d", petID, currentPage+1)))
 	} else {
 		buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData("▶️", "weight_noop"))
 	}
 
-	// ⏭ Last page
 	if currentPage < totalPages-1 {
 		buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData("⏭", fmt.Sprintf("weight_page_%d_%d", petID, totalPages-1)))
 	} else {
@@ -646,7 +737,6 @@ func buildWeightKeyboard(petID int, currentPage, totalPages int) tgbotapi.Inline
 func (b *Bot) handleCallbackQuery(log *slog.Logger, callbackQuery *tgbotapi.CallbackQuery) {
 	data := callbackQuery.Data
 
-	// Handle weight_noop — just acknowledge, no action
 	if data == "weight_noop" {
 		callback := tgbotapi.NewCallback(callbackQuery.ID, "")
 		if _, err := b.api.Request(callback); err != nil {
@@ -655,31 +745,26 @@ func (b *Bot) handleCallbackQuery(log *slog.Logger, callbackQuery *tgbotapi.Call
 		return
 	}
 
-	// Handle weight_page_<petID>_<page> callbacks
 	if strings.HasPrefix(data, "weight_page_") {
 		b.handleWeightPageCallback(log, callbackQuery)
 		return
 	}
 
-	// Handle set_injection_site:<petID>:<index> — after /add-pet
 	if strings.HasPrefix(data, "set_injection_site:") {
 		b.handleSetInjectionSiteCallback(log, callbackQuery)
 		return
 	}
 
-	// Handle change_injection_site:<petID>:<index> — after /injection-site
 	if strings.HasPrefix(data, "change_injection_site:") {
 		b.handleChangeInjectionSiteCallback(log, callbackQuery)
 		return
 	}
 
-	// Handle select_pet:<petID> — from /my-pets
 	if strings.HasPrefix(data, "select_pet:") {
 		b.handleSelectPetCallback(log, callbackQuery)
 		return
 	}
 
-	// Handle done_<petID>_<date> — injection done
 	if strings.HasPrefix(data, "done_") {
 		b.handleDoneCallback(log, callbackQuery)
 		return
@@ -687,7 +772,6 @@ func (b *Bot) handleCallbackQuery(log *slog.Logger, callbackQuery *tgbotapi.Call
 }
 
 func (b *Bot) handleWeightPageCallback(log *slog.Logger, callbackQuery *tgbotapi.CallbackQuery) {
-	// Format: weight_page_<petID>_<page>
 	trimmed := strings.TrimPrefix(callbackQuery.Data, "weight_page_")
 	parts := strings.SplitN(trimmed, "_", 2)
 	if len(parts) != 2 {
@@ -707,7 +791,6 @@ func (b *Bot) handleWeightPageCallback(log *slog.Logger, callbackQuery *tgbotapi
 		return
 	}
 
-	// Acknowledge callback
 	callback := tgbotapi.NewCallback(callbackQuery.ID, "")
 	if _, err := b.api.Request(callback); err != nil {
 		log.Error("Failed to answer weight page callback", "error", err)
@@ -741,7 +824,6 @@ func (b *Bot) handleWeightPageCallback(log *slog.Logger, callbackQuery *tgbotapi
 }
 
 func (b *Bot) handleSetInjectionSiteCallback(log *slog.Logger, callbackQuery *tgbotapi.CallbackQuery) {
-	// Format: set_injection_site:<petID>:<index>
 	parts := strings.Split(callbackQuery.Data, ":")
 	if len(parts) != 3 {
 		log.Error("Invalid set_injection_site callback data", "data", callbackQuery.Data)
@@ -773,13 +855,11 @@ func (b *Bot) handleSetInjectionSiteCallback(log *slog.Logger, callbackQuery *tg
 
 	petName := pet.Name
 
-	// Acknowledge callback
 	callback := tgbotapi.NewCallback(callbackQuery.ID, "Установлено!")
 	if _, err := b.api.Request(callback); err != nil {
 		log.Error("Failed to answer callback", "error", err)
 	}
 
-	// Edit message to show result
 	if callbackQuery.Message != nil {
 		newText := fmt.Sprintf("✅ Стартовое место укола для %s: %s", petName, reminder.InjectionSites[index])
 		editMsg := tgbotapi.NewEditMessageText(callbackQuery.Message.Chat.ID, callbackQuery.Message.MessageID, newText)
@@ -790,7 +870,6 @@ func (b *Bot) handleSetInjectionSiteCallback(log *slog.Logger, callbackQuery *tg
 }
 
 func (b *Bot) handleChangeInjectionSiteCallback(log *slog.Logger, callbackQuery *tgbotapi.CallbackQuery) {
-	// Format: change_injection_site:<petID>:<index>
 	parts := strings.Split(callbackQuery.Data, ":")
 	if len(parts) != 3 {
 		log.Error("Invalid change_injection_site callback data", "data", callbackQuery.Data)
@@ -822,13 +901,11 @@ func (b *Bot) handleChangeInjectionSiteCallback(log *slog.Logger, callbackQuery 
 
 	petName := pet.Name
 
-	// Acknowledge callback
 	callback := tgbotapi.NewCallback(callbackQuery.ID, "Изменено!")
 	if _, err := b.api.Request(callback); err != nil {
 		log.Error("Failed to answer callback", "error", err)
 	}
 
-	// Edit message to show result
 	if callbackQuery.Message != nil {
 		newText := fmt.Sprintf("✅ Стартовое место укола для %s изменено: %s", petName, reminder.InjectionSites[index])
 		editMsg := tgbotapi.NewEditMessageText(callbackQuery.Message.Chat.ID, callbackQuery.Message.MessageID, newText)
@@ -839,7 +916,6 @@ func (b *Bot) handleChangeInjectionSiteCallback(log *slog.Logger, callbackQuery 
 }
 
 func (b *Bot) handleSelectPetCallback(log *slog.Logger, callbackQuery *tgbotapi.CallbackQuery) {
-	// Format: select_pet:<petID>
 	parts := strings.Split(callbackQuery.Data, ":")
 	if len(parts) != 2 {
 		log.Error("Invalid select_pet callback data", "data", callbackQuery.Data)
@@ -867,13 +943,11 @@ func (b *Bot) handleSelectPetCallback(log *slog.Logger, callbackQuery *tgbotapi.
 
 	petName := pet.Name
 
-	// Acknowledge callback
 	callback := tgbotapi.NewCallback(callbackQuery.ID, fmt.Sprintf("Активный: %s", petName))
 	if _, err := b.api.Request(callback); err != nil {
 		log.Error("Failed to answer callback", "error", err)
 	}
 
-	// Edit message
 	if callbackQuery.Message != nil {
 		newText := fmt.Sprintf("✅ Активный питомец: **%s**", petName)
 		editMsg := tgbotapi.NewEditMessageText(callbackQuery.Message.Chat.ID, callbackQuery.Message.MessageID, newText)
@@ -887,7 +961,6 @@ func (b *Bot) handleSelectPetCallback(log *slog.Logger, callbackQuery *tgbotapi.
 }
 
 func (b *Bot) handleDoneCallback(log *slog.Logger, callbackQuery *tgbotapi.CallbackQuery) {
-	// Format: done_<petID>_<date>
 	trimmed := strings.TrimPrefix(callbackQuery.Data, "done_")
 	parts := strings.SplitN(trimmed, "_", 2)
 	if len(parts) != 2 {
@@ -917,7 +990,6 @@ func (b *Bot) handleDoneCallback(log *slog.Logger, callbackQuery *tgbotapi.Callb
 		log.Error("Failed to mark injection done", "error", err, "date", parsedDate)
 	}
 
-	// Acknowledge the callback immediately
 	callback := tgbotapi.NewCallback(callbackQuery.ID, "Отмечено!")
 	if _, err := b.api.Request(callback); err != nil {
 		log.Error("Failed to answer callback query", "error", err)

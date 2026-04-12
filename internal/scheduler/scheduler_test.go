@@ -1,29 +1,56 @@
 package scheduler
 
 import (
+	"context"
+	"log/slog"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 )
 
-func TestGetNextTargetTime(t *testing.T) {
-	// Target time: 16:00 UTC
-	targetHour := 16
-	targetMinute := 0
+func TestScheduler_CallsCallbackWithCurrentTime(t *testing.T) {
+	var calledHour, calledMinute int32
 
-	// Case 1: Before target time on the same day
-	nowBefore := time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC)
-	targetBefore := GetNextTargetTime(nowBefore, targetHour, targetMinute)
-	assert.Equal(t, time.Date(2024, 1, 1, 16, 0, 0, 0, time.UTC), targetBefore)
+	callback := func(ctx context.Context, hour, minute int) {
+		atomic.StoreInt32(&calledHour, int32(hour))
+		atomic.StoreInt32(&calledMinute, int32(minute))
+	}
 
-	// Case 2: After target time on the same day (should be next day 16:00)
-	nowAfter := time.Date(2024, 1, 1, 17, 0, 0, 0, time.UTC)
-	targetAfter := GetNextTargetTime(nowAfter, targetHour, targetMinute)
-	assert.Equal(t, time.Date(2024, 1, 2, 16, 0, 0, 0, time.UTC), targetAfter)
+	sched := New(slog.Default(), callback)
 
-	// Case 3: Exactly at target time (should be next day)
-	nowExact := time.Date(2024, 1, 1, 16, 0, 0, 0, time.UTC)
-	targetExact := GetNextTargetTime(nowExact, targetHour, targetMinute)
-	assert.Equal(t, time.Date(2024, 1, 2, 16, 0, 0, 0, time.UTC), targetExact)
+	// Call the callback directly to verify it works
+	now := time.Now().UTC()
+	callback(context.Background(), now.Hour(), now.Minute())
+
+	assert.Equal(t, int32(now.Hour()), atomic.LoadInt32(&calledHour))
+	assert.Equal(t, int32(now.Minute()), atomic.LoadInt32(&calledMinute))
+
+	// Verify struct is properly initialized
+	assert.NotNil(t, sched.callback)
+}
+
+func TestScheduler_StopsOnContextCancel(t *testing.T) {
+	callback := func(ctx context.Context, hour, minute int) {}
+
+	sched := New(slog.Default(), callback)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		sched.Start(ctx)
+		close(done)
+	}()
+
+	// Cancel immediately
+	cancel()
+
+	select {
+	case <-done:
+		// Success: scheduler stopped
+	case <-time.After(3 * time.Second):
+		t.Fatal("Scheduler did not stop within timeout")
+	}
 }

@@ -25,7 +25,6 @@ func (m *MockTelegramSender) Send(c tgbotapi.Chattable) (tgbotapi.Message, error
 func (m *MockTelegramSender) Request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
 	args := m.Called(c)
 
-	// Handle nil return
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
 	}
@@ -60,8 +59,23 @@ func (m *MockStorage) GetAllUserIDs() ([]int64, error) {
 	return args.Get(0).([]int64), args.Error(1)
 }
 
+func (m *MockStorage) GetPetsForReminder(hour, minute int) ([]storage.Pet, error) {
+	args := m.Called(hour, minute)
+	return args.Get(0).([]storage.Pet), args.Error(1)
+}
+
 func (m *MockStorage) SetInjectionSiteIndex(petID int, index int) error {
 	args := m.Called(petID, index)
+	return args.Error(0)
+}
+
+func (m *MockStorage) SetStartDate(petID int, date time.Time) error {
+	args := m.Called(petID, date)
+	return args.Error(0)
+}
+
+func (m *MockStorage) SetReminderTime(petID int, hour, minute int) error {
+	args := m.Called(petID, hour, minute)
 	return args.Error(0)
 }
 
@@ -126,17 +140,17 @@ func TestSendReminders_Success(t *testing.T) {
 	mockKV := new(MockKVStore)
 	logger := slog.Default()
 
-	bot := NewWithSender(mockSender, logger, time.Now(), mockStorage, mockKV)
+	bot := NewWithSender(mockSender, logger, mockStorage, mockKV)
 
-	// Setup: user has active pet
-	mockStorage.On("GetAllUserIDs").Return([]int64{111}, nil)
-	mockKV.On("GetActivePet", int64(111)).Return(1, nil)
-	mockStorage.On("GetPet", 1).Return(&storage.Pet{ID: 1, UserID: 111, Name: "Мурка", StartInjectionIndex: 0}, nil)
+	startDate := time.Date(2026, 3, 8, 0, 0, 0, 0, time.UTC)
+	pet := storage.Pet{ID: 1, UserID: 111, Name: "Мурка", StartInjectionIndex: 0, StartDate: startDate, ReminderHour: 16, ReminderMinute: 0}
+
+	mockStorage.On("GetPetsForReminder", 16, 0).Return([]storage.Pet{pet}, nil)
 	mockStorage.On("IsInjectionDone", 1, mock.AnythingOfType("time.Time")).Return(false, nil)
 
 	mockSender.On("Send", mock.AnythingOfType("tgbotapi.MessageConfig")).Return(tgbotapi.Message{}, nil).Once()
 
-	bot.SendReminders(context.Background(), 0, time.Now())
+	bot.SendReminders(context.Background(), 16, 0, time.Now())
 
 	mockSender.AssertExpectations(t)
 }
@@ -147,11 +161,12 @@ func TestSendReminders_RetryLogic(t *testing.T) {
 	mockKV := new(MockKVStore)
 	logger := slog.Default()
 
-	bot := NewWithSender(mockSender, logger, time.Now(), mockStorage, mockKV)
+	bot := NewWithSender(mockSender, logger, mockStorage, mockKV)
 
-	mockStorage.On("GetAllUserIDs").Return([]int64{111}, nil)
-	mockKV.On("GetActivePet", int64(111)).Return(1, nil)
-	mockStorage.On("GetPet", 1).Return(&storage.Pet{ID: 1, UserID: 111, Name: "Мурка", StartInjectionIndex: 0}, nil)
+	startDate := time.Date(2026, 3, 8, 0, 0, 0, 0, time.UTC)
+	pet := storage.Pet{ID: 1, UserID: 111, Name: "Мурка", StartInjectionIndex: 0, StartDate: startDate, ReminderHour: 16, ReminderMinute: 0}
+
+	mockStorage.On("GetPetsForReminder", 16, 0).Return([]storage.Pet{pet}, nil)
 	mockStorage.On("IsInjectionDone", 1, mock.AnythingOfType("time.Time")).Return(false, nil)
 
 	// Fail twice, succeed on third attempt
@@ -161,7 +176,7 @@ func TestSendReminders_RetryLogic(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	bot.SendReminders(ctx, 0, time.Now())
+	bot.SendReminders(ctx, 16, 0, time.Now())
 
 	mockSender.AssertExpectations(t)
 }
@@ -172,7 +187,7 @@ func TestHandleStart(t *testing.T) {
 	mockKV := new(MockKVStore)
 	logger := slog.Default()
 
-	bot := NewWithSender(mockSender, logger, time.Now(), mockStorage, mockKV)
+	bot := NewWithSender(mockSender, logger, mockStorage, mockKV)
 
 	mockStorage.On("GetPets", int64(111)).Return([]storage.Pet{}, nil)
 
@@ -191,4 +206,39 @@ func TestHandleStart(t *testing.T) {
 
 	bot.HandleUpdate(update)
 
+	mockSender.AssertExpectations(t)
+}
+
+func TestSendReminders_MultiplePetsDifferentTimes(t *testing.T) {
+	mockSender := new(MockTelegramSender)
+	mockStorage := new(MockStorage)
+	mockKV := new(MockKVStore)
+	logger := slog.Default()
+
+	bot := NewWithSender(mockSender, logger, mockStorage, mockKV)
+
+	startDate := time.Date(2026, 3, 8, 0, 0, 0, 0, time.UTC)
+
+	// At 16:00 only pet1 should get a reminder
+	pet1 := storage.Pet{ID: 1, UserID: 111, Name: "Мурка", StartInjectionIndex: 0, StartDate: startDate, ReminderHour: 16, ReminderMinute: 0}
+
+	mockStorage.On("GetPetsForReminder", 16, 0).Return([]storage.Pet{pet1}, nil)
+	mockStorage.On("IsInjectionDone", 1, mock.AnythingOfType("time.Time")).Return(false, nil)
+	mockSender.On("Send", mock.AnythingOfType("tgbotapi.MessageConfig")).Return(tgbotapi.Message{}, nil).Once()
+
+	bot.SendReminders(context.Background(), 16, 0, time.Now())
+
+	mockSender.AssertExpectations(t)
+	mockStorage.AssertExpectations(t)
+
+	// At 20:00 no pets should match
+	mockStorage2 := new(MockStorage)
+	mockSender2 := new(MockTelegramSender)
+	bot2 := NewWithSender(mockSender2, logger, mockStorage2, mockKV)
+
+	mockStorage2.On("GetPetsForReminder", 20, 0).Return([]storage.Pet{}, nil)
+
+	bot2.SendReminders(context.Background(), 20, 0, time.Now())
+
+	mockSender2.AssertNotCalled(t, "Send")
 }

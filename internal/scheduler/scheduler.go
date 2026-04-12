@@ -6,67 +6,55 @@ import (
 	"time"
 )
 
-// Scheduler handles executing a callback at a specific time every day.
+// Scheduler runs a callback every minute, passing the current UTC hour and minute.
+// This allows per-pet reminder times: the callback checks the DB for pets
+// whose reminder_time matches the current minute.
 type Scheduler struct {
 	logger   *slog.Logger
-	callback func(ctx context.Context)
-	hour     int
-	minute   int
+	callback func(ctx context.Context, hour, minute int)
 }
 
-// New creates a new Scheduler that runs every day at the given hour and minute UTC.
-func New(hour, minute int, logger *slog.Logger, callback func(ctx context.Context)) *Scheduler {
+// New creates a new Scheduler.
+func New(logger *slog.Logger, callback func(ctx context.Context, hour, minute int)) *Scheduler {
 	return &Scheduler{
 		logger:   logger,
 		callback: callback,
-		hour:     hour,
-		minute:   minute,
 	}
 }
 
-// GetNextTargetTime calculates the next target time.
-func GetNextTargetTime(now time.Time, targetHour, targetMinute int) time.Time {
-	nowUTC := now.UTC()
-	targetTime := time.Date(nowUTC.Year(), nowUTC.Month(), nowUTC.Day(), targetHour, targetMinute, 0, 0, time.UTC)
-
-	if targetTime.Before(nowUTC) || targetTime.Equal(nowUTC) {
-		targetTime = targetTime.AddDate(0, 0, 1) // Next day
-	}
-
-	return targetTime
-}
-
-// Start begins a blocking loop that calls the callback at the scheduled time.
+// Start begins a blocking loop that calls the callback every minute.
 // It stops when the context is cancelled.
 func (s *Scheduler) Start(ctx context.Context) {
+	s.logger.Info("Scheduler started, checking every minute for pending reminders")
+
+	// Align to the next full minute boundary for consistent timing
+	now := time.Now().UTC()
+	nextMinute := now.Truncate(time.Minute).Add(time.Minute)
+	alignDelay := time.Until(nextMinute)
+
+	select {
+	case <-ctx.Done():
+		s.logger.Info("Scheduler stopped before first tick")
+		return
+	case <-time.After(alignDelay):
+		// Fire immediately on the first aligned minute
+		utc := time.Now().UTC()
+		s.logger.Info("Scheduler tick", "hour", utc.Hour(), "minute", utc.Minute())
+		s.callback(ctx, utc.Hour(), utc.Minute())
+	}
+
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
 	for {
-		now := time.Now()
-		targetTime := GetNextTargetTime(now, s.hour, s.minute)
-
-		s.logger.Info("Scheduler waiting for next execution", "next_run", targetTime.Format(time.RFC3339))
-
-		// Check the clock every 30 seconds to be resilient against OS hibernation/sleep
-		ticker := time.NewTicker(30 * time.Second)
-
-	waiting:
-		for {
-			select {
-			case <-ctx.Done():
-				ticker.Stop()
-				s.logger.Info("Scheduler stopped")
-				return
-			case t := <-ticker.C:
-				if !t.UTC().Before(targetTime) {
-					ticker.Stop()
-					break waiting
-				}
-			}
+		select {
+		case <-ctx.Done():
+			s.logger.Info("Scheduler stopped")
+			return
+		case t := <-ticker.C:
+			utc := t.UTC()
+			s.logger.Info("Scheduler tick", "hour", utc.Hour(), "minute", utc.Minute())
+			s.callback(ctx, utc.Hour(), utc.Minute())
 		}
-
-		s.logger.Info("Executing scheduled task")
-		s.callback(ctx)
-
-		// To prevent double execution if the callback is very fast, sleep past the target time second
-		time.Sleep(1 * time.Second)
 	}
 }

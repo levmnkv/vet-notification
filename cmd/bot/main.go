@@ -15,7 +15,6 @@ import (
 	"github.com/levmi/vet-notifications-go/internal/config"
 	"github.com/levmi/vet-notifications-go/internal/kv"
 	"github.com/levmi/vet-notifications-go/internal/logger"
-	"github.com/levmi/vet-notifications-go/internal/reminder"
 	"github.com/levmi/vet-notifications-go/internal/scheduler"
 	"github.com/levmi/vet-notifications-go/internal/storage"
 )
@@ -23,7 +22,6 @@ import (
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
-		// Log to standard stderr before logger is fully set up if config fails
 		_, _ = os.Stderr.WriteString("Failed to load configuration: " + err.Error() + "\n")
 		os.Exit(1)
 	}
@@ -48,7 +46,7 @@ func main() {
 	// Redirect tgbotapi logs through our token mask writer
 	_ = tgbotapi.SetLogger(stdlog.New(logger.NewTokenMaskWriter(log, cfg.BotToken), "", 0))
 
-	b, err := bot.New(cfg.BotToken, log, cfg.StartDate, st, kvStore)
+	b, err := bot.New(cfg.BotToken, log, st, kvStore)
 	if err != nil {
 		log.Error("Failed to initialize bot", "error", err)
 		os.Exit(1)
@@ -87,10 +85,8 @@ func main() {
 		}
 	}()
 
-	sched := scheduler.New(cfg.ReminderHour, cfg.ReminderMinute, log, func(taskCtx context.Context) {
-		now := time.Now()
-		dayNumber := reminder.CalculateDayNumber(cfg.StartDate, now)
-		b.SendReminders(taskCtx, dayNumber, now)
+	sched := scheduler.New(log, func(taskCtx context.Context, hour, minute int) {
+		b.SendReminders(taskCtx, hour, minute, time.Now())
 	})
 
 	go sched.Start(ctx)
