@@ -1,0 +1,58 @@
+services:
+  pd:
+    image: pingcap/pd:latest
+    container_name: vet-pd
+    restart: unless-stopped
+    command:
+      - --name=pd1
+      - --client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://pd:2379
+      - --data-dir=/data/pd1
+      - --initial-cluster=pd1=http://pd:2380
+    volumes:
+      - vet-pd-data:/data/pd1
+    ports:
+      - "2379:2379"
+
+  tikv:
+    image: pingcap/tikv:latest
+    container_name: vet-tikv
+    restart: unless-stopped
+    depends_on:
+      - pd
+    command:
+      - --pd=pd:2379
+      - --advertise-addr=tikv:20160
+      - --data-dir=/data/tikv1
+    volumes:
+      - vet-tikv-data:/data/tikv1
+
+  postgres:
+    image: postgres:18-alpine
+    container_name: vet-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: vet
+      POSTGRES_PASSWORD: vet
+      POSTGRES_DB: vetdb
+    volumes:
+      - vet-pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  vet-bot-go:
+    build: .
+    container_name: vet-reminder-bot-go
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - tikv
+    env_file:
+      - .env
+    ports:
+      - "8081:8080"
+
+volumes:
+  vet-pd-data:
+  vet-tikv-data:
+  vet-pgdata:
