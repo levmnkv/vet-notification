@@ -14,9 +14,10 @@ RUN go mod download
 
 COPY . .
 
-# Build the executable
+# Build the executables
 # Added -ldflags "-w -s" to strip debug info and reduce binary size further
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o vet-bot ./cmd/bot
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o healthcheck ./cmd/healthcheck
 
 # Stage 2: Create a minimal runtime image
 FROM scratch
@@ -33,8 +34,9 @@ COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
 COPY --from=builder /etc/passwd /etc/passwd
 COPY --from=builder /etc/group /etc/group
 
-# Copy the pre-built binary
+# Copy the pre-built binaries
 COPY --from=builder /app/vet-bot .
+COPY --from=builder /app/healthcheck .
 
 # Use the non-root user
 USER botuser
