@@ -131,6 +131,19 @@ func (s *PostgresStorage) init() error {
 		return fmt.Errorf("failed to create injections table: %w", err)
 	}
 
+	// Performance Indexes
+	indexes := []string{
+		`CREATE INDEX IF NOT EXISTS idx_pets_user_id ON pets(user_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_pets_reminder_time ON pets(reminder_time);`,
+		`CREATE INDEX IF NOT EXISTS idx_weights_pet_id ON weights(pet_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_injections_pet_id ON injections(pet_id);`,
+	}
+	for _, idx := range indexes {
+		if _, err := s.db.Exec(idx); err != nil {
+			return fmt.Errorf("failed to create index %s: %w", idx, err)
+		}
+	}
+
 	return nil
 }
 
